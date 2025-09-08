@@ -4,9 +4,9 @@ import time
 import os
 from playwright.async_api import async_playwright
 
-TARGET_URL = os.getenv("TARGET_URL", "https://shopchuxam.com/")
-DURATION = int(os.getenv("DURATION", "60"))   # giây
-CONCURRENCY = int(os.getenv("CONCURRENCY", "60"))  # số tab song song
+TARGET_URL = os.getenv("TARGET_URL", "https://example.com/")
+DURATION = int(os.getenv("DURATION", "20"))   # giây
+CONCURRENCY = int(os.getenv("CONCURRENCY", "30"))  # số tab song song
 REQ_PER_LOOP = int(os.getenv("REQ_PER_LOOP", "5"))  # số request song song mỗi vòng/tab
 
 USER_AGENTS = [
